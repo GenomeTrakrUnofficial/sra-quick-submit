@@ -293,9 +293,9 @@ if __name__ == "__main__":
 	else:		
 		try:
 			with open(abspath(args.input), 'rU') as input_file:
-				entries = csv.DictReader(input_file, dialect='excel', delimiter=delimiter)
+				entries = csv.DictReader(input_file, dialect='excel', delimiter=args.delimiter)
 				for entry in entries:
-					make_submission(abspath(args.output), entry, **vars(args))
+					make_submission(abspath(args.output), entry, version='1.17', **vars(args))
 		except IndexError:
 			print "No metadata file specified."
 			print usage
