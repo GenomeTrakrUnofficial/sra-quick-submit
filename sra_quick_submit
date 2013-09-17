@@ -108,6 +108,33 @@ submission = """
 
 sample_names = list()
 
+class progressbar(object):
+    def __init__(self, finalcount, block_char='.', out=sys.stdout):
+        self.finalcount = finalcount
+        self.blockcount = 0
+        self.block = block_char
+        self.f = out
+        if not self.finalcount: return
+        self.f.write('\n------------------ % Progress -------------------1\n')
+        self.f.write('    1    2    3    4    5    6    7    8    9    0\n')
+        self.f.write('----0----0----0----0----0----0----0----0----0----0\n')
+    def progress(self, count):
+        count = min(count, self.finalcount)
+        if self.finalcount:
+            percentcomplete = int(round(100.0*count/self.finalcount))
+            if percentcomplete < 1: percentcomplete = 1
+        else:
+            percentcomplete=100
+        blockcount = int(percentcomplete//2)
+        if blockcount <= self.blockcount:
+            return
+        for i in range(self.blockcount, blockcount):
+            self.f.write(self.block)
+        self.f.flush()
+        self.blockcount = blockcount
+        if percentcomplete == 100:
+            self.f.write("\n")
+
 def make_submission(path, entry, project, hold, **kwargs):
 	"Produce three submission files - run, experiment, submission - and then tar them up."
 	print "Producing run, experiment, and submission file for sample {Sample Name}...".format(**entry)
@@ -144,7 +171,7 @@ def make_submission(path, entry, project, hold, **kwargs):
 	tarball.close()
 	sample_names.append(entry['Sample Name'])
 	
-def process_miseq_output(input_dir, output_dir, project=False, callback=lambda l: None, **kwargs):
+def process_miseq_output(input_dir, output_dir, project=False, progressbar=progressbar, **kwargs):
 	import hashlib
 	run_params = xml.parse(join(input_dir, 'RunParameters.xml'))
 	version = run_params.find('.//RTAVersion').text
@@ -164,22 +191,23 @@ def process_miseq_output(input_dir, output_dir, project=False, callback=lambda l
 				break
 			try:
 				for file_no in (1, 2):
-			
-					with open(join(input_dir, 'Data', 'Intensities', 
-						'BaseCalls', '{sample}_S{index}_L001_R{file_no}_001.fastq.gz'.format(
-							sample=entry['Sample_Name'].replace("_", "-"),
-							index=index,
-							file_no=file_no
-						)),
-					'rb'
-					) as runfile:
+					f = join(input_dir, 'Data', 'Intensities', 
+							'BaseCalls', '{sample}_S{index}_L001_R{file_no}_001.fastq.gz'.format(
+								sample=entry['Sample_Name'].replace("_", "-"),
+								index=index,
+								file_no=file_no
+							)
+						)
+					with open(f,'rb') as runfile:
+						print "Hashing {}...".format(basename(f))
+						pbar = progressbar(os.stat(f).st_size / 1048576)
 						hash = hashlib.md5()
 						line_no = 0
-						for line in runfile:
-							hash.update(line)
+						for block in iter(lambda:runfile.read(1048576), ''):
+							hash.update(block)
 							line_no += 1
-							if line_no % 1000 == 0:
-								callback(line_no)
+							pbar.progress(line_no)
+							
 						entry['file{}_name'.format(file_no)] = '{sample}_S{index}_L001_R{file_no}_001.fasta.gz'.format(
 							sample=entry['Sample_Name'],
 							index=index,
@@ -206,6 +234,9 @@ def output_table(path):
 			template_file.write("{}\t".format(h))
 		template_file.write("\n")
 	print "Wrote {}/SRA_Quick_Submit_template.txt".format(path)
+	
+	
+
 	
 if __name__ == "__main__":	
 	import argparse
@@ -258,9 +289,7 @@ if __name__ == "__main__":
 			print "No email given and $USER_PRINCIPAL_NAME var not set. Specify submitter email with -e email@email.email"
 			quit()
 	if isdir(args.input):
-		def cb(s):
-			print "{}\r".format(s),
-		process_miseq_output(abspath(args.input), abspath(args.output), callback=cb, **vars(args))
+		process_miseq_output(abspath(args.input), abspath(args.output), **vars(args))
 	else:		
 		try:
 			with open(abspath(args.input), 'rU') as input_file:
