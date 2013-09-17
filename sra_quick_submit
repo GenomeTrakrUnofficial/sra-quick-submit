@@ -4,35 +4,30 @@ import datetime
 import csv
 import tarfile
 import os
+import sys
 from os.path import *
 import xml.etree.ElementTree as xml
+import subprocess
 
-usage = r"""
+description = r"""
 	SRA Quick Submit
 	Aug 16, Justin Payne 
-(ORISE FDA-CFSAN-ORS-DM-MMSB, justin.payne@fda.hhs.gov)
-	v1.2b
+	ORISE FDA-CFSAN-ORS-DM-MMSB
+	justin.payne@fda.hhs.gov
+	v1.5b
 	
-Import a table file of metadata and generate submittable XML tarballs that can be
-uploaded to NCBI SRA. Accepts any line ending (Mac, PC, Linux).
+Import a table file of metadata or a MiSeq output directory and generate 
+submittable XML tarballs that can be uploaded to NCBI SRA. Accepts any line
+ending (Mac, PC, Linux)."""
 
-usage: sra_quick_submit [options] <metadata.txt> [options]
-
-options:
-		
--p <BioProject ID> specify NCBI BioProject ID (default: PRJNA212117, for Lee Katz's CDC lab)
--o <path>		specify output directory (default: current directory)
--d <',' or 'comma', '\t' or 'tab'>	specify delimiting character (default: tab)
--m 			Don't produce submissions; instead, write to the output directory a
-			tab-delimited template table that will work with this script.
--h			Hold submission until this date (YYYY-MM-DD format.)
-
+change_history = """
 Change history:
 Aug 29 v1.1b: protection from sample name collision. 
-Sept 6 v1.2b: -p flag for specifying BioProject ID.
+Sep 6  v1.2b: -p flag for specifying BioProject ID.
+Sep 16 v1.5b:  release version for GenomeTrakr community.
 """
 
-project = 'PRJNA212117'
+
 
 experiment = """
 <EXPERIMENT alias="{Sample Name}" xmlns="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -80,7 +75,7 @@ experiment = """
 				<STEP_INDEX>0</STEP_INDEX>
 			   	<PREV_STEP_INDEX>NULL</PREV_STEP_INDEX>
 			   	<PROGRAM>RTA</PROGRAM>
-			   	<VERSION>1.17.28</VERSION>
+			   	<VERSION>{version}</VERSION>
 			</PIPE_SECTION>
 		</PIPELINE>
 	</PROCESSING>
@@ -102,7 +97,7 @@ run = """
 submission = """
 <SUBMISSION alias="{Sample Name}{num}" submission_comment="GenomeTrakr pathogen sampling project">	
 	<CONTACTS>
-		<CONTACT inform_on_error="mailto:gzu2@cdc.gov" inform_on_status="mailto:gzu2@cdc.gov" name="CLC/EDLB:Lee Katz" />
+		<CONTACT inform_on_error="mailto:{email}" inform_on_status="{email}" name="{name}" />
 	</CONTACTS>
 	<ACTIONS>
 	<ACTION><ADD schema="experiment" source="{Sample Name}{num}.experiment.xml" /></ACTION>
@@ -113,25 +108,35 @@ submission = """
 
 sample_names = list()
 
-def make_submission(path, entry, date=datetime.datetime.today().strftime("%Y-%m-%d")):
+def make_submission(path, entry, project, hold, **kwargs):
 	"Produce three submission files - run, experiment, submission - and then tar them up."
 	print "Producing run, experiment, and submission file for sample {Sample Name}...".format(**entry)
+	
+	entry.update(kwargs)
 	
 	if entry['Sample Name'] in sample_names:
 		entry['num'] = ".{:02}".format(sample_names.count(entry['Sample Name']) + 1)
 	else:
 		entry['num'] = ''
 	
+	try:
+		if not exists(path):
+			os.makedirs(path)
+			print "Made {}.".format(path)
+		exp = xml.fromstring(experiment.format(project=project, **entry))
+		xml.ElementTree(exp).write(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
 	
-	exp = xml.fromstring(experiment.format(project=project, **entry))
-	xml.ElementTree(exp).write(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+		r = xml.fromstring(run.format(**entry))
+		xml.ElementTree(r).write(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
 	
-	r = xml.fromstring(run.format(**entry))
-	xml.ElementTree(r).write(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
-	
-	sub = xml.fromstring(submission.format(date=date, **entry))
-	xml.ElementTree(sub).write(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
-	
+		sub = xml.fromstring(submission.format(date=hold, **entry))
+		xml.ElementTree(sub).write(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+	except xml.ParseError as e:
+		print "XML internal parsing failed. Tried to parse:"
+		print experiment.format(project=project, **entry)
+		print run.format(**entry)
+		print submission.format(date=date, **entry)
+		raise e
 	tarball = tarfile.open(join(path, '{Sample Name}{num}.submission_archive.tar'.format(**entry)), 'w', format=tarfile.GNU_FORMAT)
 	tarball.add(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), arcname='{Sample Name}{num}.experiment.xml'.format(**entry))
 	tarball.add(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), arcname='{Sample Name}{num}.run.xml'.format(**entry))
@@ -139,63 +144,136 @@ def make_submission(path, entry, date=datetime.datetime.today().strftime("%Y-%m-
 	tarball.close()
 	sample_names.append(entry['Sample Name'])
 	
+def process_miseq_output(input_dir, output_dir, project=False, callback=lambda l: None, **kwargs):
+	import hashlib
+	run_params = xml.parse(join(input_dir, 'RunParameters.xml'))
+	version = run_params.find('.//RTAVersion').text
+	with open(join(input_dir, 'SampleSheet.csv'), 'rU') as samplesheet:
+		for line in samplesheet: #step past header lines to data section
+			if '[Data]' in line:
+				break
+		entries = list(csv.DictReader(samplesheet, delimiter=','))
+		for entry, index in zip(entries, range(1, len(entries) + 1)):
+			if 'SAMN' in entry['Sample_Name']:
+				entry['Sample Name'] = entry['organism'] = entry['Biosample Accession'] = entry['Sample_Name']
+			elif 'SAMN' in entry['Sample_ID']:
+				entry['Biosample Accession'] = entry['Sample_ID']
+				entry['Sample Name'] = entry['organism'] = entry['Sample_Name']
+			else:
+				print "Can't submit sample {Sample_Name}, no NCBI BioSample ID.".format(**entry)
+				break
+			try:
+				for file_no in (1, 2):
+			
+					with open(join(input_dir, 'Data', 'Intensities', 
+						'BaseCalls', '{sample}_S{index}_L001_R{file_no}_001.fastq.gz'.format(
+							sample=entry['Sample_Name'].replace("_", "-"),
+							index=index,
+							file_no=file_no
+						)),
+					'rb'
+					) as runfile:
+						hash = hashlib.md5()
+						line_no = 0
+						for line in runfile:
+							hash.update(line)
+							line_no += 1
+							if line_no % 1000 == 0:
+								callback(line_no)
+						entry['file{}_name'.format(file_no)] = '{sample}_S{index}_L001_R{file_no}_001.fasta.gz'.format(
+							sample=entry['Sample_Name'],
+							index=index,
+							file_no=file_no
+						)
+						entry['file{}_checksum'.format(file_no)] = hash.hexdigest()
+						entry['version'] = version
+			except (IOError, OSError) as e:
+				print e
+				continue
+			make_submission(output_dir, entry, project or entry['Sample_Project'], **kwargs)	
+				
+					
+def output_table(path):
+	with open(join(path, 'SRA_Quick_Submit_template.txt'), 'w') as template_file:
+		for h in ('Sample Name',
+				  'organism',
+				  'strain',
+				  'Biosample Accession',
+				  'file1_name',
+				  'file1_checksum',
+				  'file2_name',
+				  'file2_checksum'):
+			template_file.write("{}\t".format(h))
+		template_file.write("\n")
+	print "Wrote {}/SRA_Quick_Submit_template.txt".format(path)
 	
-if __name__ == "__main__":
-	#Collect flags, parse parameters, then load the metadata file and make submissions
-	import sys
-	path = os.getcwd()
-	delimiter = '\t'
-	date = None
-	if '-p' in sys.argv:
-		project = sys.argv.pop(sys.argv.index('-p') + 1)
-		sys.argv.remove('-p')
-	else:
-		print "No BioProject ID specified, using {}".format(project)
-	if '-o' in sys.argv:
-		path = normpath(sys.argv.pop(sys.argv.index('-o') + 1))
-		sys.argv.remove('-o')
-	if '-h' in sys.argv:
-		date = sys.argv.pop(sys.argv.index('-h') + 1)
-		sys.argv.remove('-h')
-		print "Submitting with HOLD date: {}".format(date)
-
-	if '-m' in sys.argv:
-		with open(join(path, 'SRA_Quick_Submit_template.txt'), 'w') as template_file:
-			for h in ('Sample Name',
-					  'organism',
-					  'strain',
-					  'Biosample Accession',
-					  'file1_name',
-					  'file1_checksum',
-					  'file2_name',
-					  'file2_checksum'):
-				template_file.write("{}\t".format(h))
-			template_file.write("\n")
-			print "Wrote {}/SRA_Quick_Submit_template.txt".format(path)
+if __name__ == "__main__":	
+	import argparse
+			
+	p = argparse.ArgumentParser(description=description, 
+								epilog=change_history, 
+								argument_default=False,
+								formatter_class=argparse.RawDescriptionHelpFormatter)						
+	
+	p.add_argument('-o', '--output', action='store', 
+				   metavar='PATH', 
+				   help="Output directory. Will be created if it doesn't already exist. [default: %(default)s]", 
+				   default=os.getcwd())
+	p.add_argument('-d', '--hold-date', metavar="YYYY-MM-DD", 
+				   help="Hold this submission until specified date. SRA allows up to a one-year hold.",
+				   action='store',
+				   dest='hold')
+	p.add_argument('-l', '--delimiter', metavar="CHARACTER", 
+				   help="Character used as delimiter in table. [default: \\t]", 
+				   action='store', 
+				   default='\t')
+	p.add_argument('-n', '--name', metavar="NAME", help="Submitter name.", action='store')
+	p.add_argument('-e', '--email', metavar="email@email.email", help="Submitter email.", action='store')
+	p.add_argument('project', metavar="PRJNAxxxxxxx", action='store')
+	p.add_argument('input', metavar="PATH or FILE", action='store')
+	
+	args = p.parse_args()
+	
+	if not args.hold:
+		args.hold = datetime.datetime.today().strftime("%Y-%m-%d")
+		print "No HOLD date specified, using default: {}".format(args.hold)
+		
+	if not args.name:
+		for key in ('USER', 'LOGNAME'):
+			try:
+				args.name = os.environ[key]
+				print "Name not specified; got '{}' from shell environment".format(args.name)
+				break
+			except KeyError:
+				pass
+		if not args.name:
+			print """No name given and $USER/$LOGNAME vars not set. Specify submitter name with -n "My Name"."""
 			quit()
-	if '-d' in sys.argv:
-		delimiter_command = sys.argv.pop(sys.argv.index('-d') + 1)
-		if 'tab' in delimiter_command:
-			delimiter = '\t'
-		if 'comma' in delimiter_command:
-			delimiter = ','
-		else:
-			delimiter = delimiter_command
-	if not date:
-		date = datetime.datetime.today().strftime("%Y-%m-%d")
-		print "No HOLD date specified, using default: {}".format(date)
-	try:
-		with open(sys.argv[1], 'rU') as input_file:
-			entries = csv.DictReader(input_file, dialect='excel', delimiter=delimiter)
-			for entry in entries:
-				make_submission(path, entry, date)
-	except IndexError:
-		print "No metadata file specified."
-		print usage
-		quit()
-	except IOError:
-		print "{} not found. Check file location and try again.".format(sys.argv[1])
-		quit()
+			
+	if not args.email:
+		try:
+			args.email = os.environ['USER_PRINCIPAL_NAME']
+			print "Email not specified; got '{}' from shell environment".format(args.email)
+		except KeyError:
+			print "No email given and $USER_PRINCIPAL_NAME var not set. Specify submitter email with -e email@email.email"
+			quit()
+	if isdir(args.input):
+		def cb(s):
+			print "{}\r".format(s),
+		process_miseq_output(abspath(args.input), abspath(args.output), callback=cb, **vars(args))
+	else:		
+		try:
+			with open(abspath(args.input), 'rU') as input_file:
+				entries = csv.DictReader(input_file, dialect='excel', delimiter=delimiter)
+				for entry in entries:
+					make_submission(abspath(args.output), entry, **vars(args))
+		except IndexError:
+			print "No metadata file specified."
+			print usage
+			quit()
+		except IOError:
+			print "{} not found. Check file location and try again.".format(sys.argv[1])
+			quit()
 		
 	
 	
