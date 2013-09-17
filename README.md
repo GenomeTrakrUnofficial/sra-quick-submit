@@ -6,7 +6,7 @@ Quick Python tool for making SRA submissions as part of the GenomeTrakr Joint Fo
 
 	usage: sra_quick_submit [-h] [-o PATH] [-d YYYY-MM-DD] [-l CHARACTER]
                         	[-n NAME] [-e email@email.email]
-                        	PRJNAxxxxxxx PATH or FILE
+                        	<PRJNAxxxxxxx> <PATH | FILE>
 
 	SRA Quick Submit
 	Aug 16, Justin Payne 
