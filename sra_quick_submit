@@ -8,13 +8,14 @@ import sys
 from os.path import *
 import xml.etree.ElementTree as xml
 import subprocess
+import urllib
 
 description = r"""
 	SRA Quick Submit
 	Aug 16, Justin Payne 
 	ORISE FDA-CFSAN-ORS-DM-MMSB
 	justin.payne@fda.hhs.gov
-	v1.5b
+	v1.6b
 	
 Import a table file of metadata or a MiSeq output directory and generate 
 submittable XML tarballs that can be uploaded to NCBI SRA. Accepts any line
@@ -24,13 +25,14 @@ change_history = """
 Change history:
 Aug 29 v1.1b: protection from sample name collision. 
 Sep 6  v1.2b: -p flag for specifying BioProject ID.
-Sep 16 v1.5b:  release version for GenomeTrakr community.
+Sep 16 v1.5b: release version for GenomeTrakr community.
+Sep 27 v1.6b: -g flag to merge runs with existing experiments, if possible 
 """
 
 
 
 experiment = """
-<EXPERIMENT alias="{Sample Name}" xmlns="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<EXPERIMENT alias="{Sample Name}{num}" xmlns="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 	<TITLE>Whole genome shotgun sequencing of {organism} by Illumina MiSeq</TITLE>
 	<STUDY_REF accession="{project}" />
 	<DESIGN>
@@ -42,13 +44,13 @@ experiment = """
         <LIBRARY_SOURCE>GENOMIC</LIBRARY_SOURCE>
         <LIBRARY_SELECTION>RANDOM</LIBRARY_SELECTION>
         <LIBRARY_LAYOUT>
-          <PAIRED NOMINAL_LENGTH="500" />
+          <PAIRED NOMINAL_LENGTH="{library_length}" />
         </LIBRARY_LAYOUT>
         <LIBRARY_CONSTRUCTION_PROTOCOL>Illumina Nextera XT library created for {organism}.</LIBRARY_CONSTRUCTION_PROTOCOL>
       </LIBRARY_DESCRIPTOR>
       <SPOT_DESCRIPTOR>
               <SPOT_DECODE_SPEC>
-                <SPOT_LENGTH>502</SPOT_LENGTH>
+                <SPOT_LENGTH>{spot}</SPOT_LENGTH>
                 <READ_SPEC>
                   <READ_INDEX>0</READ_INDEX>
                   <READ_CLASS>Application Read</READ_CLASS>
@@ -59,7 +61,7 @@ experiment = """
                   <READ_INDEX>1</READ_INDEX>
                   <READ_CLASS>Application Read</READ_CLASS>
                   <READ_TYPE>Reverse</READ_TYPE>
-                  <BASE_COORD>251</BASE_COORD>
+                  <BASE_COORD>{half_spot}</BASE_COORD>
                 </READ_SPEC>
               </SPOT_DECODE_SPEC>
       </SPOT_DESCRIPTOR>
@@ -83,7 +85,7 @@ experiment = """
 """
 
 run = """
-<RUN alias="{Sample Name}">
+<RUN alias="{Sample Name}{num}">
  <EXPERIMENT_REF refname="{Sample Name}" />
  <DATA_BLOCK>
   <FILES>
@@ -106,70 +108,140 @@ submission = """
 </SUBMISSION>
 """
 
+submission_no_exp = """
+<SUBMISSION alias="{Sample Name}" submission_comment="GenomeTrakr pathogen sampling project">	
+	<CONTACTS>
+		<CONTACT inform_on_error="mailto:{email}" inform_on_status="{email}" name="{name}" />
+	</CONTACTS>
+	<ACTIONS>
+	<ACTION><ADD schema="run" source="{Sample Name}.run.xml" /></ACTION>
+	<ACTION><HOLD HoldUntilDate="{date}Z" /></ACTION></ACTIONS>
+</SUBMISSION>
+"""
+
 sample_names = list()
+sample_cache = dict()
+
 
 class progressbar(object):
-    def __init__(self, finalcount, block_char='.', out=sys.stdout):
-        self.finalcount = finalcount
-        self.blockcount = 0
-        self.block = block_char
-        self.f = out
-        if not self.finalcount: return
-        self.f.write('\n------------------ % Progress -------------------1\n')
-        self.f.write('    1    2    3    4    5    6    7    8    9    0\n')
-        self.f.write('----0----0----0----0----0----0----0----0----0----0\n')
-    def progress(self, count):
-        count = min(count, self.finalcount)
-        if self.finalcount:
-            percentcomplete = int(round(100.0*count/self.finalcount))
-            if percentcomplete < 1: percentcomplete = 1
-        else:
-            percentcomplete=100
-        blockcount = int(percentcomplete//2)
-        if blockcount <= self.blockcount:
-            return
-        for i in range(self.blockcount, blockcount):
-            self.f.write(self.block)
-        self.f.flush()
-        self.blockcount = blockcount
-        if percentcomplete == 100:
-            self.f.write("\n")
+	"A basic CLI progress bar. From Python Cookbook 2nd Ed., Martelli, Ravenscroft, Ascher. 2005 O'Reilly Media."
+	def __init__(self, finalcount, block_char='.', out=sys.stdout):
+		self.finalcount = finalcount
+		self.blockcount = 0
+		self.block = block_char
+		self.f = out
+		if not self.finalcount: return
+		self.f.write('\n------------------ % Progress -------------------1\n')
+		self.f.write('    1    2    3    4    5    6    7    8    9    0\n')
+		self.f.write('----0----0----0----0----0----0----0----0----0----0\n')
+	def progress(self, count):
+		count = min(count, self.finalcount)
+		if self.finalcount:
+			percentcomplete = int(round(100.0*count/self.finalcount))
+			if percentcomplete < 1: percentcomplete = 1
+		else:
+			percentcomplete=100
+		blockcount = int(percentcomplete//2)
+		if blockcount <= self.blockcount:
+			return
+		for i in range(self.blockcount, blockcount):
+			self.f.write(self.block)
+		self.f.flush()
+		self.blockcount = blockcount
+		if percentcomplete == 100:
+			self.f.write("\n")
+		
+def check_ncbi_for_prev_experiment(sample_name):
+	"Use a combination of NCBI E-Utils to detect past MiSeq experiments for this sample, so that new runs can be attached"
+	if "SAMN" not in sample_name:
+		raise ValueError("{} not a valid NCBI BioSample ID.".format(sample_name))
+	query = urllib.urlencode({"db":"sra", "term":sample_name, "field":"BSPL"})
+	r1 = xml.fromstring(urllib.urlopen("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi", data=query).read())
+	for sra in [e.text for e in r1.findall(".//Id")]:
+		query = urllib.urlencode({"db":"SRA", "id":sra})
+		r2 = xml.fromstring(urllib.urlopen("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi", data=query).read())
+		for sra_exp in r2.findall(".//EXPERIMENT"):
+			if "Illumina MiSeq" in sra_exp.find(".//INSTRUMENT_MODEL").text:
+				return sra_exp.attrib['accession']
+	return False
 
-def make_submission(path, entry, project, hold, **kwargs):
+def make_submission(path, entry, project, hold, merge=False, **kwargs):
 	"Produce three submission files - run, experiment, submission - and then tar them up."
-	print "Producing run, experiment, and submission file for sample {Sample Name}...".format(**entry)
 	
 	entry.update(kwargs)
+	if not exists(path):
+		os.makedirs(path)
+		print "Made {}.".format(path)
 	
-	if entry['Sample Name'] in sample_names:
-		entry['num'] = ".{:02}".format(sample_names.count(entry['Sample Name']) + 1)
-	else:
+	if merge and (entry['Sample Name'] in merge.split(" ") or 'all' in merge):
 		entry['num'] = ''
+		if entry['Sample Name'] in sample_cache:
+			r = xml.fromstring(run.format(**entry))
+			run_set = sample_cache[entry['Sample Name']]
+			run_set.append(r)
+		else:
+			sample_cache[entry['Sample Name']] = run_set = xml.Element("RUN_SET")
+			run_set.append(xml.fromstring(run.format(**entry)))
+		
+		try:
+			exp_acc = check_ncbi_for_prev_experiment(entry['Biosample Accession'])
+		except ValueError:
+			print locals()
+		
+		if exp_acc:
+			print "Found a previous experiment: {}".format(exp_acc)
+			sub = xml.fromstring(submission_no_exp.format(date=hold, **entry))
+			for ref in run_set.findall(".//EXPERIMENT_REF"):
+				ref.attrib['accession'] = exp_acc
+		else:
+			print "No experiment found. Creating a new one..."
+			exp = xml.fromstring(experiment.format(project=project, **entry))
+			xml.ElementTree(exp).write(join(path, '{Sample Name}.experiment.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+			sub = xml.fromstring(submission.format(date=hold, **entry))
+		
+		xml.ElementTree(run_set).write(join(path, '{Sample Name}.run.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+		xml.ElementTree(sub).write(join(path, '{Sample Name}.submission.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+		with tarfile.open(join(path, '{Sample Name}.submission_archive.tar'.format(**entry)), 'w', format=tarfile.GNU_FORMAT) as tarball:
+			tarball.add(join(path, '{Sample Name}.run.xml'.format(**entry)), arcname='{Sample Name}.run.xml'.format(**entry))
+			tarball.add(join(path, '{Sample Name}.submission.xml'.format(**entry)), arcname='{Sample Name}.submission.xml'.format(**entry))
+			try:
+				tarball.add(join(path, '{Sample Name}.experiment.xml'.format(**entry)), arcname='{Sample Name}.experiment.xml'.format(**entry))
+				print "Produced run, experiment, and submission files for {}".format(entry['Sample Name'])
+			except (OSError, IOError):
+				print "Produced run and submission files for {}".format(entry['Sample Name'])
+				
+		
+		
+	else:
+		if entry['Sample Name'] in sample_names:
+			entry['num'] = ".{:02}".format(sample_names.count(entry['Sample Name']) + 1)
+		else:
+			entry['num'] = ''
 	
-	try:
-		if not exists(path):
-			os.makedirs(path)
-			print "Made {}.".format(path)
-		exp = xml.fromstring(experiment.format(project=project, **entry))
-		xml.ElementTree(exp).write(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+		try:
+			
+			exp = xml.fromstring(experiment.format(project=project, **entry))
+			xml.ElementTree(exp).write(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
 	
-		r = xml.fromstring(run.format(**entry))
-		xml.ElementTree(r).write(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+			r = xml.fromstring(run.format(**entry))
+			r_set = xml.Element("RUN_SET")
+			r_set.append(r)
+			xml.ElementTree(r).write(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
 	
-		sub = xml.fromstring(submission.format(date=hold, **entry))
-		xml.ElementTree(sub).write(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
-	except xml.ParseError as e:
-		print "XML internal parsing failed. Tried to parse:"
-		print experiment.format(project=project, **entry)
-		print run.format(**entry)
-		print submission.format(date=date, **entry)
-		raise e
-	tarball = tarfile.open(join(path, '{Sample Name}{num}.submission_archive.tar'.format(**entry)), 'w', format=tarfile.GNU_FORMAT)
-	tarball.add(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), arcname='{Sample Name}{num}.experiment.xml'.format(**entry))
-	tarball.add(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), arcname='{Sample Name}{num}.run.xml'.format(**entry))
-	tarball.add(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), arcname='{Sample Name}{num}.submission.xml'.format(**entry))
-	tarball.close()
-	sample_names.append(entry['Sample Name'])
+			sub = xml.fromstring(submission.format(date=hold, **entry))
+			xml.ElementTree(sub).write(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
+		except xml.ParseError as e:
+			print "XML internal parsing failed. Tried to parse:"
+			print experiment.format(project=project, **entry)
+			print run.format(**entry)
+			print submission.format(date=date, **entry)
+			raise e
+		tarball = tarfile.open(join(path, '{Sample Name}{num}.submission_archive.tar'.format(**entry)), 'w', format=tarfile.GNU_FORMAT)
+		tarball.add(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), arcname='{Sample Name}{num}.experiment.xml'.format(**entry))
+		tarball.add(join(path, '{Sample Name}{num}.run.xml'.format(**entry)), arcname='{Sample Name}{num}.run.xml'.format(**entry))
+		tarball.add(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), arcname='{Sample Name}{num}.submission.xml'.format(**entry))
+		tarball.close()
+		sample_names.append(entry['Sample Name'])
 	
 def process_miseq_output(input_dir, output_dir, project=False, progressbar=progressbar, **kwargs):
 	import hashlib
@@ -222,6 +294,8 @@ def process_miseq_output(input_dir, output_dir, project=False, progressbar=progr
 				
 					
 def output_table(path):
+	if not exists(path):
+		os.makedirs(path)
 	with open(join(path, 'SRA_Quick_Submit_template.txt'), 'w') as template_file:
 		for h in ('Sample Name',
 				  'organism',
@@ -238,7 +312,7 @@ def output_table(path):
 	
 
 	
-if __name__ == "__main__":	
+if __name__ == "__main__":
 	import argparse
 			
 	p = argparse.ArgumentParser(description=description, 
@@ -260,9 +334,38 @@ if __name__ == "__main__":
 				   default='\t')
 	p.add_argument('-n', '--name', metavar="NAME", help="Submitter name.", action='store')
 	p.add_argument('-e', '--email', metavar="email@email.email", help="Submitter email.", action='store')
-	p.add_argument('project', metavar="PRJNAxxxxxxx", action='store')
-	p.add_argument('input', metavar="PATH or FILE", action='store')
+	p.add_argument('-m', '--library-length', metavar="INT", 
+				   help='Nominal library insert length [default: 500]', 
+				   action='store', 
+				   default=500)
 	
+
+	p.add_argument('-r', '--read-length', metavar="INT", 
+				   help='Total read length (number of primary flows) [default: 250]', 
+				   action='store', 
+				   default=0,
+				   type=int)
+	p.add_argument('-g', '--merge', metavar="<sample name | 'all'>",
+				   help='Merge identical sample names into single experiment. This should be done if the same library was re-used for multiple runs. Specify the sample names to merge or "all" to merge all multiply-present samples [default: do not merge]',
+				   action='store',
+				   default=False)
+	p.add_argument('project', metavar="<PRJNAxxxxxxx>", action='store')
+	p.add_argument('input', metavar="<PATH | FILE>", action='store')
+	p.add_argument('--make-table', help="Instead of producing a submission, produce a table template which this script can accept as input.", action='store_true')
+	
+	#quickly manually parse sys.argv, looking for the 'write table' option
+	if '--make-table' in sys.argv:
+		try:
+			path = sys.argv.pop(sys.argv.index("-o") + 1)
+		except ValueError:
+			try:
+				path = sys.argv.pop(sys.argv.index("--output") + 1)
+			except ValueError:
+				path = os.getcwd()
+		output_table(path)
+		quit()
+	
+	#allow argparse to parse the command-line args
 	args = p.parse_args()
 	
 	if not args.hold:
@@ -288,6 +391,14 @@ if __name__ == "__main__":
 		except KeyError:
 			print "No email given and $USER_PRINCIPAL_NAME var not set. Specify submitter email with -e email@email.email"
 			quit()
+			
+	if not args.read_length:
+		args.spot = 502
+		args.half_spot = 251	
+	else:
+		args.half_spot = args.read_length + 1
+		args.spot = (args.read_length + 1) * 2
+	
 	if isdir(args.input):
 		process_miseq_output(abspath(args.input), abspath(args.output), **vars(args))
 	else:		
