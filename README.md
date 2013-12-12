@@ -22,8 +22,7 @@ Quick Python tool for making SRA submissions as part of the GenomeTrakr Next Gen
 	  -h, --help            show this help message and exit
 	  -o PATH, --output PATH
 							Output directory. Will be created if it doesn't
-							already exist. [default:
-							/Users/justin.payne/scripts/srasubmit]
+							already exist. [default:$PWD]
 	  -d YYYY-MM-DD, --hold-date YYYY-MM-DD
 							Hold this submission until specified date. SRA allows
 							up to a one-year hold.
