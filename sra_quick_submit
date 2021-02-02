@@ -27,6 +27,7 @@ Aug 29 v1.1b: protection from sample name collision.
 Sep 6  v1.2b: -p flag for specifying BioProject ID.
 Sep 16 v1.5b: release version for GenomeTrakr community.
 Sep 27 v1.6b: -g flag to merge runs with existing experiments, if possible 
+Feb 2, 2021 v1.7: Update to Python 3
 """
 
 
@@ -168,10 +169,12 @@ def check_ncbi_for_prev_experiment(sample_name):
 def make_submission(path, entry, project, hold, merge=False, **kwargs):
 	"Produce three submission files - run, experiment, submission - and then tar them up."
 	
+	exp_acc = None
+
 	entry.update(kwargs)
 	if not exists(path):
 		os.makedirs(path)
-		print "Made {}.".format(path)
+		print("Made {}.".format(path))
 	
 	if merge and (entry['Sample Name'] in merge.split(" ") or 'all' in merge):
 		entry['num'] = ''
@@ -186,15 +189,15 @@ def make_submission(path, entry, project, hold, merge=False, **kwargs):
 		try:
 			exp_acc = check_ncbi_for_prev_experiment(entry['Biosample Accession'])
 		except ValueError:
-			print locals()
+			print(locals())
 		
 		if exp_acc:
-			print "Found a previous experiment: {}".format(exp_acc)
+			print("Found a previous experiment: {}".format(exp_acc))
 			sub = xml.fromstring(submission_no_exp.format(date=hold, **entry))
 			for ref in run_set.findall(".//EXPERIMENT_REF"):
 				ref.attrib['accession'] = exp_acc
 		else:
-			print "No experiment found. Creating a new one..."
+			print("No experiment found. Creating a new one...")
 			exp = xml.fromstring(experiment.format(project=project, **entry))
 			xml.ElementTree(exp).write(join(path, '{Sample Name}.experiment.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
 			sub = xml.fromstring(submission.format(date=hold, **entry))
@@ -206,9 +209,9 @@ def make_submission(path, entry, project, hold, merge=False, **kwargs):
 			tarball.add(join(path, '{Sample Name}.submission.xml'.format(**entry)), arcname='{Sample Name}.submission.xml'.format(**entry))
 			try:
 				tarball.add(join(path, '{Sample Name}.experiment.xml'.format(**entry)), arcname='{Sample Name}.experiment.xml'.format(**entry))
-				print "Produced run, experiment, and submission files for {}".format(entry['Sample Name'])
+				print("Produced run, experiment, and submission files for {}".format(entry['Sample Name']))
 			except (OSError, IOError):
-				print "Produced run and submission files for {}".format(entry['Sample Name'])
+				print("Produced run and submission files for {}".format(entry['Sample Name']))
 				
 		
 		
@@ -231,10 +234,10 @@ def make_submission(path, entry, project, hold, merge=False, **kwargs):
 			sub = xml.fromstring(submission.format(date=hold, **entry))
 			xml.ElementTree(sub).write(join(path, '{Sample Name}{num}.submission.xml'.format(**entry)), encoding="UTF-8", xml_declaration=True)
 		except xml.ParseError as e:
-			print "XML internal parsing failed. Tried to parse:"
-			print experiment.format(project=project, **entry)
-			print run.format(**entry)
-			print submission.format(date=date, **entry)
+			print("XML internal parsing failed. Tried to parse:")
+			print(experiment.format(project=project, **entry))
+			print(run.format(**entry))
+			print(submission.format(date=date, **entry))
 			raise e
 		tarball = tarfile.open(join(path, '{Sample Name}{num}.submission_archive.tar'.format(**entry)), 'w', format=tarfile.GNU_FORMAT)
 		tarball.add(join(path, '{Sample Name}{num}.experiment.xml'.format(**entry)), arcname='{Sample Name}{num}.experiment.xml'.format(**entry))
@@ -259,7 +262,7 @@ def process_miseq_output(input_dir, output_dir, project=False, progressbar=progr
 				entry['Biosample Accession'] = entry['Sample_ID']
 				entry['Sample Name'] = entry['organism'] = entry['Sample_Name']
 			else:
-				print "Can't submit sample {Sample_Name}, no NCBI BioSample ID.".format(**entry)
+				print("Can't submit sample {Sample_Name}, no NCBI BioSample ID.".format(**entry))
 				break
 			try:
 				for file_no in (1, 2):
@@ -271,7 +274,7 @@ def process_miseq_output(input_dir, output_dir, project=False, progressbar=progr
 							)
 						)
 					with open(f,'rb') as runfile:
-						print "Hashing {}...".format(basename(f))
+						print("Hashing {}...".format(basename(f)))
 						pbar = progressbar(os.stat(f).st_size / 1048576)
 						hash = hashlib.md5()
 						line_no = 0
@@ -288,7 +291,7 @@ def process_miseq_output(input_dir, output_dir, project=False, progressbar=progr
 						entry['file{}_checksum'.format(file_no)] = hash.hexdigest()
 						entry['version'] = version
 			except (IOError, OSError) as e:
-				print e
+				print(e)
 				continue
 			make_submission(output_dir, entry, project or entry['Sample_Project'], **kwargs)	
 				
@@ -307,7 +310,7 @@ def output_table(path):
 				  'file2_checksum'):
 			template_file.write("{}\t".format(h))
 		template_file.write("\n")
-	print "Wrote {}/SRA_Quick_Submit_template.txt".format(path)
+	print("Wrote {}/SRA_Quick_Submit_template.txt".format(path))
 	
 	
 
@@ -370,26 +373,26 @@ if __name__ == "__main__":
 	
 	if not args.hold:
 		args.hold = datetime.datetime.today().strftime("%Y-%m-%d")
-		print "No HOLD date specified, using default: {}".format(args.hold)
+		print("No HOLD date specified, using default: {}".format(args.hold))
 		
 	if not args.name:
 		for key in ('USER', 'LOGNAME'):
 			try:
 				args.name = os.environ[key]
-				print "Name not specified; got '{}' from shell environment".format(args.name)
+				print("Name not specified; got '{}' from shell environment".format(args.name))
 				break
 			except KeyError:
 				pass
 		if not args.name:
-			print """No name given and $USER/$LOGNAME vars not set. Specify submitter name with -n "My Name"."""
+			print("""No name given and $USER/$LOGNAME vars not set. Specify submitter name with -n "My Name".""")
 			quit()
 			
 	if not args.email:
 		try:
 			args.email = os.environ['USER_PRINCIPAL_NAME']
-			print "Email not specified; got '{}' from shell environment".format(args.email)
+			print("Email not specified; got '{}' from shell environment".format(args.email))
 		except KeyError:
-			print "No email given and $USER_PRINCIPAL_NAME var not set. Specify submitter email with -e email@email.email"
+			print("No email given and $USER_PRINCIPAL_NAME var not set. Specify submitter email with -e email@email.email")
 			quit()
 			
 	if not args.read_length:
@@ -408,11 +411,11 @@ if __name__ == "__main__":
 				for entry in entries:
 					make_submission(abspath(args.output), entry, version='1.17', **vars(args))
 		except IndexError:
-			print "No metadata file specified."
-			print usage
+			print("No metadata file specified.")
+			print(usage)
 			quit()
 		except IOError:
-			print "{} not found. Check file location and try again.".format(sys.argv[1])
+			print("{} not found. Check file location and try again.".format(sys.argv[1]))
 			quit()
 		
 	
