@@ -315,7 +315,7 @@ def output_table(path):
 	
 
 	
-if __name__ == "__main__":
+def main():
 	import argparse
 			
 	p = argparse.ArgumentParser(description=description, 
@@ -421,3 +421,5 @@ if __name__ == "__main__":
 	
 	
 
+if __name__ == '__main__':
+	main()
